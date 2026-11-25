@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Navbar from './components/Navbar'
 import Hero from './components/Hero'
 import Reality from './components/Reality'
@@ -14,32 +14,48 @@ import { useToast } from './hooks/useToast'
 import { useLiveReaders } from './hooks/useLiveReaders'
 import { INITIAL_TESTIMONIALS } from './data/content'
 import {
-  createId,
+  fetchTestimonials,
+  postTestimonial,
+  submitPledge,
+  syncPledges,
+  syncVisits,
+} from './lib/api'
+import {
   loadPledgeState,
   loadUserTestimonials,
   registerVisit,
-  savePledgeState,
-  saveUserTestimonials,
 } from './lib/storage'
 
 /**
  * Composición principal de Caserito Digno.
- * El estado global vive aquí: visitas, testimonios de la comunidad y
- * compromisos ciudadanos. Todo persiste en localStorage.
+ * Sincroniza datos con la API de Vercel/Supabase, manteniendo resiliencia
+ * offline-first con localStorage.
  */
 export default function App() {
   const readers = useLiveReaders()
-  const [visits] = useState(() => registerVisit())
+  const [visits, setVisits] = useState(() => registerVisit())
   const [userTestimonials, setUserTestimonials] = useState(() => loadUserTestimonials())
   const [pledge, setPledge] = useState(() => loadPledgeState())
   const [modalOpen, setModalOpen] = useState(false)
   const justSubmitted = useRef(false)
   const { notify } = useToast()
 
-  const testimonials = useMemo(
-    () => [...userTestimonials, ...INITIAL_TESTIMONIALS],
-    [userTestimonials],
-  )
+  // Sincronizar datos con el backend (Supabase + Vercel Serverless)
+  useEffect(() => {
+    syncVisits().then(setVisits)
+    syncPledges().then(setPledge)
+    fetchTestimonials().then((remote) => {
+      if (Array.isArray(remote) && remote.length > 0) {
+        setUserTestimonials(remote)
+      }
+    })
+  }, [])
+
+  const testimonials = useMemo(() => {
+    const existingIds = new Set(userTestimonials.map((t) => t.id))
+    const fallbackSeed = INITIAL_TESTIMONIALS.filter((t) => !existingIds.has(t.id))
+    return [...userTestimonials, ...fallbackSeed]
+  }, [userTestimonials])
 
   const openTestimonialModal = useCallback(() => setModalOpen(true), [])
 
@@ -54,30 +70,22 @@ export default function App() {
   }, [])
 
   const handleTestimonialSubmit = useCallback(
-    (data) => {
-      const testimonial = {
-        ...data,
-        id: createId(),
-        isNew: true,
-        createdAt: Date.now(),
-      }
-      const next = [testimonial, ...userTestimonials].slice(0, 40)
-      setUserTestimonials(next)
-      saveUserTestimonials(next)
+    async (data) => {
+      const saved = await postTestimonial(data)
+      setUserTestimonials((prev) => [saved, ...prev.filter((t) => t.id !== saved.id)])
       justSubmitted.current = true
       notify('Gracias por compartir tu historia. Tu testimonio ya está publicado.')
     },
-    [userTestimonials, notify],
+    [notify],
   )
 
-  const handlePledge = useCallback(() => {
+  const handlePledge = useCallback(async () => {
     if (pledge.hasPledged) {
       notify('Ya eres parte de Caserito Digno. Gracias por sostener la campaña.', 'info')
       return
     }
-    const next = { count: pledge.count + 1, hasPledged: true }
+    const next = await submitPledge()
     setPledge(next)
-    savePledgeState(next)
     notify('¡Bienvenido/a! Tu compromiso ciudadano ya suma a la campaña.')
   }, [pledge, notify])
 
